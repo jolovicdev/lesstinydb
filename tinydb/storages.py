@@ -100,7 +100,8 @@ class JSONStorage(Storage):
 
         self._mode = access_mode
         self.kwargs = kwargs
-
+        self._transaction_data = None
+        self._in_transaction = False
         if access_mode not in ('r', 'rb', 'r+', 'rb+'):
             warnings.warn(
                 'Using an `access_mode` other than \'r\', \'rb\', \'r+\' '
@@ -156,6 +157,45 @@ class JSONStorage(Storage):
         # gotten shorter
         self._handle.truncate()
 
+    def begin(self) -> None:
+        """
+        Begin a new transaction by saving current state
+        """
+        if self._in_transaction:
+            raise RuntimeError("Transaction already in progress")
+        
+        # Store current state
+        self._handle.seek(0)
+        self._transaction_data = self._handle.read()
+        self._in_transaction = True
+
+    def commit(self) -> None:
+        """
+        Commit the current transaction
+        """
+        if not self._in_transaction:
+            raise RuntimeError("No transaction in progress")
+            
+        self._in_transaction = False
+        self._transaction_data = None
+        # Actual save happens through normal write operations
+
+    def rollback(self) -> None:
+        """
+        Rollback the current transaction
+        """
+        if not self._in_transaction:
+            raise RuntimeError("No transaction in progress")
+            
+        # Restore previous state
+        self._handle.seek(0)
+        self._handle.write(self._transaction_data)
+        self._handle.truncate()
+        self._handle.flush()
+        os.fsync(self._handle.fileno())
+        
+        self._in_transaction = False
+        self._transaction_data = None
 
 class MemoryStorage(Storage):
     """

@@ -107,7 +107,27 @@ class TinyDB(TableBase):
         ]
 
         return '<{} {}>'.format(type(self).__name__, ', '.join(args))
+    
+    def begin_transaction(self):
+        """
+        Begin a new transaction.
+        """
+        self.storage.begin()
+        return self
 
+    def commit(self):
+        """
+        Commit the current transaction.
+        """
+        self.storage.commit()
+        return self
+
+    def rollback(self):
+        """
+        Rollback the current transaction.
+        """
+        self.storage.rollback()
+        return self
     def table(self, name: str, **kwargs) -> Table:
         """
         Get access to a specific table.
@@ -252,6 +272,8 @@ class TinyDB(TableBase):
         """
         Forward all unknown attribute calls to the default table instance.
         """
+        if name in ['begin_transaction', 'commit', 'rollback']:
+            raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
         return getattr(self.table(self.default_table_name), name)
 
     # Here we forward magic methods to the default table instance. These are

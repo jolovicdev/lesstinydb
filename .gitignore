@@ -42,3 +42,5 @@ nosetests.xml
 *.db.yml
 
 .DS_Store
+test_dbs
+start.py
