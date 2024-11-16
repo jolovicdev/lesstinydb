@@ -72,6 +72,71 @@ Example Code
     >>> db.insert({'int': 1, 'char': 'a'})
     >>> db.insert({'int': 1, 'char': 'b'})
 
+Transactions (BETA)
+***********
+
+TinyDB KINDA supports ACID-compliant transactions. Here are some examples:
+
+Basic Transaction
+================
+
+.. code-block:: python
+
+  from tinydb import TinyDB, JSONStorage
+  
+  # Create database
+  db = TinyDB('db.json', storage=JSONStorage)
+  
+  # Use transaction context manager
+  with db.transaction():
+    db.insert({'key': 'value'})
+    # Transaction automatically commits if no errors occur
+    # Rolls back on any exception
+
+Transaction Rollback Example
+==========================
+
+.. code-block:: python
+
+  from tinydb import TinyDB, JSONStorage
+  
+  db = TinyDB('db.json', storage=JSONStorage)
+  
+  # Initial insert
+  db.insert({'id': 1, 'value': 'initial'})
+  
+  try:
+    with db.transaction():
+      db.insert({'id': 2, 'value': 'will_rollback'})
+      raise Exception("Simulated failure")
+  except Exception:
+    # Transaction rolled back automatically
+    pass
+
+Concurrent Transactions
+=====================
+
+.. code-block:: python
+
+  from tinydb import TinyDB, Query
+  from multiprocessing import Process
+  
+  def process_work(pid):
+    db = TinyDB('db.json', storage=JSONStorage)
+    User = Query()
+    
+    try:
+      with db.transaction():
+        db.insert({'process': f'process_{pid}'})
+        # Work here...
+    finally:
+      db.close()
+  
+  # Start multiple processes
+  processes = [Process(target=process_work, args=(i,)) 
+        for i in range(3)]
+  for p in processes:
+    p.start()
 Query Language
 ==============
 
