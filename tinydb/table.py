@@ -3,6 +3,7 @@ This module implements tables, the central place for accessing and manipulating
 data in TinyDB.
 """
 
+from contextlib import contextmanager
 from typing import (
     Callable,
     Dict,
@@ -509,7 +510,26 @@ class Table:
         self._update_table(updater)
 
         return updated_ids
+    @contextmanager
+    def transaction(self):
+        """
+        Handle transactions at table level.
+        All operations within the context manager will be atomic.
+        """
+        with self._storage.transaction():
+            yield self
 
+    def __enter__(self):
+        """
+        Support for context manager protocol for transaction handling.
+        """
+        return self.transaction().__enter__()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        Handle transaction completion in context manager.
+        """
+        return self.transaction().__exit__(exc_type, exc_val, exc_tb)
     def upsert(self, document: Mapping, cond: Optional[QueryLike] = None) -> List[int]:
         """
         Update documents, if they exist, insert them otherwise.

@@ -1,6 +1,7 @@
 """
 This module contains the main component of TinyDB: the database.
 """
+from contextlib import contextmanager
 from typing import Dict, Iterator, Set, Type
 
 from . import JSONStorage
@@ -220,7 +221,14 @@ class TinyDB(TableBase):
 
         # Store the updated data back to the storage
         self.storage.write(data)
-
+    @contextmanager
+    def transaction(self):
+        """
+            Handle transactions at database level.
+            All operations within the context manager will be atomic.
+            """
+        with self.storage.transaction():
+                yield self
     @property
     def storage(self) -> Storage:
         """
@@ -259,14 +267,16 @@ class TinyDB(TableBase):
 
         :return: The current instance
         """
-        return self
+        return self.transaction().__enter__()
 
-    def __exit__(self, *args):
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
         """
         Close the storage instance when leaving a context.
         """
         if self._opened:
             self.close()
+        return self.transaction().__exit__(exc_type, exc_val, exc_tb)
 
     def __getattr__(self, name):
         """

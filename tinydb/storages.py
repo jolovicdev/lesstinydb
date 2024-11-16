@@ -3,6 +3,8 @@ Contains the :class:`base class <tinydb.storages.Storage>` for storages and
 implementations.
 """
 
+from contextlib import contextmanager
+import fcntl
 import io
 import json
 import os
@@ -35,183 +37,221 @@ def touch(path: str, create_dirs: bool):
 
 class Storage(ABC):
     """
-    The abstract base class for all Storages.
-
+    The abstract base class for all Storages with transaction support.
     A Storage (de)serializes the current state of the database and stores it in
     some place (memory, file on disk, ...).
     """
-
-    # Using ABCMeta as metaclass allows instantiating only storages that have
-    # implemented read and write
+    def __init__(self):
+        self._in_transaction = False
 
     @abstractmethod
     def read(self) -> Optional[Dict[str, Dict[str, Any]]]:
-        """
-        Read the current state.
-
-        Any kind of deserialization should go here.
-
-        Return ``None`` here to indicate that the storage is empty.
-        """
-
+        """Read the current state."""
         raise NotImplementedError('To be overridden!')
 
     @abstractmethod
     def write(self, data: Dict[str, Dict[str, Any]]) -> None:
-        """
-        Write the current state of the database to the storage.
-
-        Any kind of serialization should go here.
-
-        :param data: The current state of the database.
-        """
-
+        """Write the current state of the database to the storage."""
         raise NotImplementedError('To be overridden!')
 
     def close(self) -> None:
-        """
-        Optional: Close open file handles, etc.
-        """
-
+        """Optional: Close open file handles, etc."""
         pass
+
+    @abstractmethod
+    def _begin_transaction(self) -> None:
+        """
+        Implementation-specific transaction start logic.
+        Should handle creating backups, acquiring locks, etc.
+        """
+        raise NotImplementedError('To be overridden!')
+
+    @abstractmethod
+    def _commit_transaction(self) -> None:
+        """
+        Implementation-specific transaction commit logic.
+        Should handle cleanup, releasing locks, etc.
+        """
+        raise NotImplementedError('To be overridden!')
+
+    @abstractmethod
+    def _rollback_transaction(self) -> None:
+        """
+        Implementation-specific transaction rollback logic.
+        Should handle restoring from backup, cleanup, releasing locks, etc.
+        """
+        raise NotImplementedError('To be overridden!')
+
+    def begin(self) -> None:
+        """Begin a new transaction."""
+        if self._in_transaction:
+            raise RuntimeError("Transaction already in progress")
+        self._in_transaction = True
+        self._begin_transaction()
+
+    def commit(self) -> None:
+        """Commit the current transaction."""
+        if not self._in_transaction:
+            raise RuntimeError("No transaction in progress")
+        try:
+            self._commit_transaction()
+        finally:
+            self._in_transaction = False
+
+    def rollback(self) -> None:
+        """Rollback the current transaction."""
+        if not self._in_transaction:
+            raise RuntimeError("No transaction in progress")
+        try:
+            self._rollback_transaction()
+        finally:
+            self._in_transaction = False
+
+    @contextmanager
+    def transaction(self):
+        """Context manager for transaction handling."""
+        self.begin()
+        try:
+            yield self
+            self.commit()
+        except:
+            self.rollback()
+            raise
+
+    def __enter__(self):
+        """Support for context manager protocol."""
+        return self.transaction().__enter__()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Handle transaction completion in context manager."""
+        return self.transaction().__exit__(exc_type, exc_val, exc_tb)
 
 
 class JSONStorage(Storage):
-    """
-    Store the data in a JSON file.
-    """
-
+    """Store the data in a JSON file with proper transaction support."""
     def __init__(self, path: str, create_dirs=False, encoding=None, access_mode='r+', **kwargs):
-        """
-        Create a new instance.
-
-        Also creates the storage file, if it doesn't exist and the access mode
-        is appropriate for writing.
-
-        Note: Using an access mode other than `r` or `r+` will probably lead to
-        data loss or data corruption!
-
-        :param path: Where to store the JSON data.
-        :param access_mode: mode in which the file is opened (r, r+)
-        :type access_mode: str
-        """
-
         super().__init__()
-
         self._mode = access_mode
+        self.path = path
+        self.encoding = encoding or 'utf-8'  # Make sure we have an encoding
         self.kwargs = kwargs
-        self._transaction_data = None
-        self._in_transaction = False
-        if access_mode not in ('r', 'rb', 'r+', 'rb+'):
-            warnings.warn(
-                'Using an `access_mode` other than \'r\', \'rb\', \'r+\' '
-                'or \'rb+\' can cause data loss or corruption'
-            )
-
-        # Create the file if it doesn't exist and creating is allowed by the
-        # access mode
-        if any([character in self._mode for character in ('+', 'w', 'a')]):  # any of the writing modes
+        self._lock_file = None
+        if any([character in self._mode for character in ('+', 'w', 'a')]):
             touch(path, create_dirs=create_dirs)
+            
+        self._handle = open(path, mode=self._mode, encoding=self.encoding)
 
-        # Open the file for reading/writing
-        self._handle = open(path, mode=self._mode, encoding=encoding)
+    def _acquire_lock(self):
+        """Acquire an exclusive lock on the database file"""
+        if not self._lock_file:
+            lock_path = f"{self.path}.lock"
+            self._lock_file = open(lock_path, 'w')
+        fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_EX)
+
+    def _release_lock(self):
+        """Release the exclusive lock on the database file"""
+        fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
+
+    def _begin_transaction(self) -> None:
+        """Implementation of transaction start for JSON storage."""
+        self._backup_path = f"{self.path}.backup"
+        self._acquire_lock()
+        # Create backup file - using same encoding as main file
+        with open(self.path, 'r', encoding=self.encoding) as source:
+            content = source.read()
+            with open(self._backup_path, 'w', encoding=self.encoding) as target:
+                target.write(content)
+
+    def _commit_transaction(self) -> None:
+        """Implementation of transaction commit for JSON storage."""
+        self._handle.flush()
+        os.fsync(self._handle.fileno())
+        # Remove backup after successful commit
+        if os.path.exists(self._backup_path):
+            os.remove(self._backup_path)
+        self._release_lock()
+
+    def _rollback_transaction(self) -> None:
+        """Implementation of transaction rollback for JSON storage."""
+        try:
+            # Close current handle
+            self._handle.close()
+            
+            # Restore from backup
+            with open(self._backup_path, 'r', encoding=self.encoding) as backup:
+                content = backup.read()
+            
+            # Write backup content to main file
+            with open(self.path, 'w', encoding=self.encoding) as main:
+                main.write(content)
+            
+            # Reopen the handle
+            self._handle = open(self.path, mode=self._mode, encoding=self.encoding)
+            
+        finally:
+            # Clean up backup
+            if os.path.exists(self._backup_path):
+                os.remove(self._backup_path)
+            self._release_lock()
+
 
     def close(self) -> None:
+        """Close the file handle."""
         self._handle.close()
 
     def read(self) -> Optional[Dict[str, Dict[str, Any]]]:
-        # Get the file size by moving the cursor to the file end and reading
-        # its location
+        # Get the file size
         self._handle.seek(0, os.SEEK_END)
         size = self._handle.tell()
 
         if not size:
-            # File is empty, so we return ``None`` so TinyDB can properly
-            # initialize the database
             return None
-        else:
-            # Return the cursor to the beginning of the file
-            self._handle.seek(0)
+        
+        # Return to start and read
+        self._handle.seek(0)
+        return json.load(self._handle)
 
-            # Load the JSON contents of the file
-            return json.load(self._handle)
-
-    def write(self, data: Dict[str, Dict[str, Any]]):
-        # Move the cursor to the beginning of the file just in case
+    def write(self, data: Dict[str, Dict[str, Any]]) -> None:
+        # Move to start
         self._handle.seek(0)
 
-        # Serialize the database state using the user-provided arguments
+        # Write the serialized data
         serialized = json.dumps(data, **self.kwargs)
-
-        # Write the serialized data to the file
+        
         try:
             self._handle.write(serialized)
         except io.UnsupportedOperation:
-            raise IOError('Cannot write to the database. Access mode is "{0}"'.format(self._mode))
+            raise IOError(f'Cannot write to the database. Access mode is "{self._mode}"')
 
-        # Ensure the file has been written
+        # Ensure written to disk
         self._handle.flush()
         os.fsync(self._handle.fileno())
 
-        # Remove data that is behind the new cursor in case the file has
-        # gotten shorter
+        # Truncate any remaining data
         self._handle.truncate()
-
-    def begin(self) -> None:
-        """
-        Begin a new transaction by saving current state
-        """
-        if self._in_transaction:
-            raise RuntimeError("Transaction already in progress")
-        
-        # Store current state
-        self._handle.seek(0)
-        self._transaction_data = self._handle.read()
-        self._in_transaction = True
-
-    def commit(self) -> None:
-        """
-        Commit the current transaction
-        """
-        if not self._in_transaction:
-            raise RuntimeError("No transaction in progress")
-            
-        self._in_transaction = False
-        self._transaction_data = None
-        # Actual save happens through normal write operations
-
-    def rollback(self) -> None:
-        """
-        Rollback the current transaction
-        """
-        if not self._in_transaction:
-            raise RuntimeError("No transaction in progress")
-            
-        # Restore previous state
-        self._handle.seek(0)
-        self._handle.write(self._transaction_data)
-        self._handle.truncate()
-        self._handle.flush()
-        os.fsync(self._handle.fileno())
-        
-        self._in_transaction = False
-        self._transaction_data = None
 
 class MemoryStorage(Storage):
-    """
-    Store the data as JSON in memory.
-    """
-
+    """Store the data in memory with transaction support."""
     def __init__(self):
-        """
-        Create a new instance.
-        """
-
         super().__init__()
         self.memory = None
+        self._backup = None
 
     def read(self) -> Optional[Dict[str, Dict[str, Any]]]:
         return self.memory
 
     def write(self, data: Dict[str, Dict[str, Any]]):
         self.memory = data
+
+    def _begin_transaction(self) -> None:
+        """Implementation of transaction start for memory storage."""
+        self._backup = json.loads(json.dumps(self.memory)) if self.memory is not None else None
+
+    def _commit_transaction(self) -> None:
+        """Implementation of transaction commit for memory storage."""
+        self._backup = None
+
+    def _rollback_transaction(self) -> None:
+        """Implementation of transaction rollback for memory storage."""
+        self.memory = self._backup
+        self._backup = None
